@@ -45,6 +45,12 @@ class Plan(UUIDMixin, TimestampMixin, Base):
 
 class Booking(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "bookings"
+    # NOTE: PostgreSQL also carries an exclusion constraint preventing two
+    # blocking bookings from overlapping on the same outlet. It is declared
+    # ONLY in the Alembic migration, never here, because SQLite cannot express
+    # it and the test suite builds its schema with Base.metadata.create_all.
+    # The model and the production database therefore differ on purpose —
+    # see alembic/versions/*_booking_writes.py.
     __table_args__ = (
         CheckConstraint("ends_at > starts_at", name="ck_booking_window_valid"),
         # Drives the availability query.
@@ -71,11 +77,29 @@ class Booking(UUIDMixin, TimestampMixin, Base):
         index=True,
     )
 
+    #: What the customer was actually charged, snapshotted at creation.
+    #: Plan prices change; a receipt must show what was paid, not today's price.
+    amount_kobo: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    #: An unpaid booking holds an outlet, so it has to time out. After this
+    #: instant the booking stops blocking (see services/availability.py) and
+    #: the sweeper moves it to CANCELLED. Null once the booking is paid.
+    pending_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+    #: Supplied by the client per checkout attempt. A double-tap on a flaky
+    #: mobile connection must not produce two bookings.
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(64), unique=True, index=True, nullable=True
+    )
+
     outlet: Mapped["object"] = relationship("Outlet", lazy="selectin")
     plan: Mapped[Plan] = relationship(lazy="selectin")
 
     #: Statuses that occupy an outlet for availability purposes.
     BLOCKING = (BookingStatus.PENDING, BookingStatus.CONFIRMED, BookingStatus.ACTIVE)
+
+    #: How long an unpaid booking holds its outlet.
+    PENDING_TTL_MINUTES = 10
 
     def __repr__(self) -> str:
         return f"<Booking {self.id} {self.status.value}>"

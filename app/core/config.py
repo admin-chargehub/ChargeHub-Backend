@@ -16,6 +16,20 @@ class Settings(BaseSettings):
 
     environment: str = "development"
 
+    #: Fabricate energy readings for active sessions, so the Active Session and
+    #: receipt screens have moving data before any firmware exists. Development
+    #: only — `get_settings()` refuses to start with this on in production,
+    #: because an invented kWh figure on a real receipt is a billing lie.
+    simulate_telemetry: bool = True
+
+    #: How much faster than real time the simulated energy accrues. Real
+    #: charging is slow — a 48 W draw needs 75 seconds to register its first
+    #: whole watt-hour, so an honest 1× simulation looks broken on a demo.
+    #: Energy is still clamped to the plan's cap, so this changes how quickly
+    #: the cap is reached, never how much is delivered. Only ever applies when
+    #: simulate_telemetry is on.
+    simulate_speedup: int = 60
+
     # NoDecode stops pydantic-settings from trying to JSON-parse the env var
     # before our validator runs, which is what lets us accept a plain
     # comma-separated list instead of requiring '["http://..."]'.
@@ -38,6 +52,11 @@ def get_settings() -> Settings:
     settings = Settings()
     if settings.is_production and settings.secret_key == "dev-only-change-me":
         raise RuntimeError("SECRET_KEY must be set to a real value in production")
+    if settings.is_production and settings.simulate_telemetry:
+        raise RuntimeError(
+            "SIMULATE_TELEMETRY must be off in production — it invents energy "
+            "readings, which would put fabricated figures on customer receipts."
+        )
     return settings
 
 

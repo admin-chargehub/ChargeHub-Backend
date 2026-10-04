@@ -23,13 +23,42 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.models import Booking, BookingStatus, Outlet, OutletStatus
+from app.models.base import utcnow
 
 #: Outlet states that can accept a new booking.
 BOOKABLE_STATUSES = (OutletStatus.AVAILABLE, OutletStatus.IN_USE, OutletStatus.RESERVED)
+
+
+def blocking_clause(now: datetime | None = None) -> ColumnElement[bool]:
+    """Bookings that actually occupy an outlet at `now`.
+
+    `Booking.BLOCKING` alone is not enough. It includes PENDING, so without the
+    TTL below an abandoned checkout would hold an outlet forever — the customer
+    closes the tab at the payment step and nobody can book that socket again.
+
+    A PENDING booking past `pending_expires_at` stops blocking immediately here,
+    which is what keeps availability honest between sweeper runs. Note the
+    PostgreSQL exclusion constraint cannot apply the same cutoff (its predicate
+    may not call `now()`), so a write can still conflict with an expired pending
+    row until the sweeper cancels it.
+
+    `now` is "is this hold still live", which is always the present moment —
+    not the window being tested. It is a parameter only so tests can pin it.
+    """
+    now = now or utcnow()
+    return and_(
+        Booking.status.in_(Booking.BLOCKING),
+        or_(
+            Booking.status != BookingStatus.PENDING,
+            Booking.pending_expires_at.is_(None),
+            Booking.pending_expires_at > now,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +126,7 @@ async def find_earliest_slot(
             await db.execute(
                 select(Booking.outlet_id, Booking.starts_at, Booking.ends_at)
                 .where(Booking.outlet_id.in_(outlet_ids))
-                .where(Booking.status.in_(Booking.BLOCKING))
+                .where(blocking_clause())
                 .where(Booking.ends_at > not_before)
             )
         )
@@ -142,7 +171,7 @@ async def is_outlet_free(
     stmt = (
         select(Booking.id)
         .where(Booking.outlet_id == outlet_id)
-        .where(Booking.status.in_(Booking.BLOCKING))
+        .where(blocking_clause())
         .where(Booking.starts_at < ends_at)
         .where(Booking.ends_at > starts_at)
         .limit(1)
@@ -163,7 +192,7 @@ async def outlet_status_snapshot(
                 select(Booking.outlet_id, Booking.status)
                 .join(Outlet, Outlet.id == Booking.outlet_id)
                 .where(Outlet.station_id == station_id)
-                .where(Booking.status.in_(Booking.BLOCKING))
+                .where(blocking_clause())
                 .where(Booking.starts_at <= at)
                 .where(Booking.ends_at > at)
             )

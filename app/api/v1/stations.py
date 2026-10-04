@@ -4,10 +4,10 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
 from app.api.deps import DbSession
-from app.models import Outlet, Station
+from app.models import Outlet, OutletStatus, Station
 from app.models.base import utcnow
 from app.schemas.station import OutletOut, StationDetailOut, StationOut
-from app.services.availability import BOOKABLE_STATUSES, outlet_status_snapshot
+from app.services.availability import outlet_status_snapshot
 
 router = APIRouter(prefix="/stations", tags=["stations"])
 
@@ -31,10 +31,14 @@ async def get_station(station_id: uuid.UUID, db: DbSession) -> StationDetailOut:
     occupied = await outlet_status_snapshot(db, station_id, utcnow())
 
     outlets = list(station.outlets)
+    # "Free now" is stricter than "bookable". BOOKABLE_STATUSES includes IN_USE
+    # and RESERVED, because an occupied outlet can still be booked for a later
+    # window — but it is plainly not free this minute, and reporting it as such
+    # made a station with two outlets in use read "8 of 8 available".
     free_now = sum(
         1
         for o in outlets
-        if o.status in BOOKABLE_STATUSES and o.id not in occupied
+        if o.status is OutletStatus.AVAILABLE and o.id not in occupied
     )
 
     return StationDetailOut(
