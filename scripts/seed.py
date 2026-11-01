@@ -15,22 +15,25 @@ from app.core.database import SessionLocal
 from app.core.security import hash_password
 from app.models import Outlet, OutletStatus, Plan, Station, User, UserRole
 
-# Duration-tiered plans, matching the Figma customer flow: Quick ₦100/hr,
-# Standard ₦1000/2hr, Day ₦2000/24hr. Prices are in kobo (₦1 = 100 kobo).
+# Duration-tiered plans, taken from the Figma "Select Outlet & Plan" screen on
+# the Web Screens page: Quick 1 hour ₦300, Standard 3 hours ₦700, Day 24 hours
+# ₦1,500. Prices are in kobo (₦1 = 100 kobo).
 #
-# ⚠ TODO(P1): power_cap_w and energy_cap_wh are placeholders. The design shows
-# neither, but they are what the firmware actually enforces per session, so they
-# must be derived from the load study before the pilot. Do not ship these values.
+# This is the third price list the design has carried. The previous one (Quick
+# ₦100/1h, Standard ₦1,000/2h, Day ₦2,000/24h) had Standard costing five times
+# Quick per hour; this one is monotonically cheaper per hour as the duration
+# grows, which at least behaves like a tariff. Worth confirming it is final
+# before anyone is actually charged.
 #
-# ⚠ TODO(P4): the price curve looks wrong — Quick is ₦100/hr, Standard works out
-# at ₦500/hr, Day at ₦83/hr. Standard being the most expensive per hour is
-# probably not intended. Confirm the tariff before taking real money.
+# ⚠ TODO(P1): power_cap_w and energy_cap_wh remain placeholders. The design
+# shows neither, but they are what the firmware enforces per session, so they
+# must come from the load study before the pilot. Do not ship these values.
 #
-#        name       slug       W    Wh    mins  kobo    recommended devices
+#        name       slug       W    Wh    mins   kobo   recommended devices
 PLANS = [
-    ("Quick",    "quick",     80,    80,    60,  10000, "Phone top-up"),
-    ("Standard", "standard", 200,   400,   120, 100000, "Phone, tablet, laptop"),
-    ("Day",      "day",      200,  4800,  1440, 200000, "Laptop + peripherals"),
+    ("Quick",    "quick",     80,    80,    60,  30000, "Phone top-up"),
+    ("Standard", "standard", 200,   600,   180,  70000, "Phone, tablet, laptop"),
+    ("Day",      "day",      200,  4800,  1440, 150000, "Laptop + peripherals"),
 ]
 
 # Hubs around the University of Ibadan campus. UI Hub is the real pilot site;
@@ -54,7 +57,8 @@ class Hub(NamedTuple):
 
 
 STATIONS = [
-    Hub("ui-pilot", "UI Hub", "Faculty of Technology, Appleton Road",
+    # Address per the latest design, which moved UI Hub to Ring Road.
+    Hub("ui-pilot", "UI Hub", "Ring Road, Ibadan",
         7.4433, 3.8964, outlets=8, busy=2, faulty=0),
     Hub("zik-hub", "Zik Hub", "Nnamdi Azikiwe Hall, University of Ibadan",
         7.4469, 3.8991, outlets=6, busy=4, faulty=1),
