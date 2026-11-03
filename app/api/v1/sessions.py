@@ -55,7 +55,7 @@ async def _to_out(db, session: ChargingSession) -> SessionOut:
 
 
 _REDEMPTION_STATUS = {
-    svc.MalformedCode: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    svc.MalformedCode: status.HTTP_422_UNPROCESSABLE_CONTENT,
     svc.RateLimited: status.HTTP_429_TOO_MANY_REQUESTS,
     svc.OutletNotUsable: status.HTTP_409_CONFLICT,
 }

@@ -30,7 +30,7 @@ async def check_availability(
     not_before = payload.not_before or utcnow()
     if not_before.tzinfo is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="not_before must include a timezone offset",
         )
 

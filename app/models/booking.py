@@ -81,6 +81,11 @@ class Booking(UUIDMixin, TimestampMixin, Base):
     #: Plan prices change; a receipt must show what was paid, not today's price.
     amount_kobo: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    #: When payment settled. Revenue has to be reportable by the day the money
+    #: arrived, and `updated_at` cannot stand in for that — any later edit to
+    #: the row would silently move the booking into a different day's takings.
+    paid_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
     #: An unpaid booking holds an outlet, so it has to time out. After this
     #: instant the booking stops blocking (see services/availability.py) and
     #: the sweeper moves it to CANCELLED. Null once the booking is paid.

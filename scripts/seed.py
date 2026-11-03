@@ -7,13 +7,24 @@ duplicated, so changing a name or address here and re-running is enough.
 """
 
 import asyncio
+from datetime import timedelta
 from typing import NamedTuple
 
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.core.security import hash_password
-from app.models import Outlet, OutletStatus, Plan, Station, User, UserRole
+from app.models import (
+    Outlet,
+    OutletStatus,
+    Plan,
+    PowerSource,
+    Station,
+    StationTelemetry,
+    User,
+    UserRole,
+    utcnow,
+)
 
 # Duration-tiered plans, taken from the Figma "Select Outlet & Plan" screen on
 # the Web Screens page: Quick 1 hour ₦300, Standard 3 hours ₦700, Day 24 hours
@@ -71,6 +82,23 @@ STATIONS = [
 ]
 
 DEMO_EMAIL = "demo@chargehub.ng"
+OPERATOR_EMAIL = "operator@chargehub.ng"
+OPERATOR_PASSWORD = "chargehub123"
+
+# Power state per hub, so the operator console opens on a site that is visibly
+# multi-source rather than a wall of identical rows. These mirror a plausible
+# Ibadan afternoon: most sites on solar, one on grid, one burning diesel, one
+# that stopped reporting an hour ago.
+#
+# slug -> (source, battery %, solar W, load W, grid?, gen running?,
+#          gen mins, minutes since last seen)
+TELEMETRY = {
+    "ui-pilot":   ("solar",     87, 2400,  900, True,  False,   0,   1),
+    "zik-hub":    ("grid",      62,  180,  640, True,  False,   0,   2),
+    "tedder-hub": ("generator", 24,    0,  480, False, True,   95,   1),
+    "mellanby":   ("solar",     94, 1850,  210, True,  False,   0,   4),
+    "kuti-hub":   ("battery",   41,   60,  150, False, False,  30,  85),
+}
 DEMO_PASSWORD = "chargehub123"
 
 
@@ -153,6 +181,48 @@ async def main() -> None:
                 )
             )
             print(f"  demo user: {DEMO_EMAIL} / {DEMO_PASSWORD}")
+
+        operator = (
+            await db.execute(select(User).where(User.email == OPERATOR_EMAIL))
+        ).scalar_one_or_none()
+        if operator is None:
+            db.add(
+                User(
+                    email=OPERATOR_EMAIL,
+                    full_name="Site Operator",
+                    hashed_password=hash_password(OPERATOR_PASSWORD),
+                    role=UserRole.OPERATOR,
+                )
+            )
+            print(f"  operator:  {OPERATOR_EMAIL} / {OPERATOR_PASSWORD}")
+
+        # Telemetry is upserted every run so repeated seeding refreshes
+        # last_seen_at. Otherwise every station drifts offline overnight and
+        # the next demo opens on a dead board.
+        await db.flush()
+        for slug, (source, soc, solar, load, grid, gen, gen_mins, stale_min) in TELEMETRY.items():
+            station = (
+                await db.execute(select(Station).where(Station.slug == slug))
+            ).scalar_one_or_none()
+            if station is None:
+                continue
+            row = (
+                await db.execute(
+                    select(StationTelemetry).where(StationTelemetry.station_id == station.id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = StationTelemetry(station_id=station.id)
+                db.add(row)
+            row.source = PowerSource(source)
+            row.battery_soc_pct = soc
+            row.solar_w = solar
+            row.load_w = load
+            row.grid_available = grid
+            row.generator_running = gen
+            row.generator_minutes_today = gen_mins
+            row.last_seen_at = utcnow() - timedelta(minutes=stale_min)
+        print(f"  telemetry: {len(TELEMETRY)} stations")
 
         await db.commit()
         print("seed complete")

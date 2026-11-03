@@ -150,6 +150,7 @@ async def pay_booking(db: AsyncSession, booking: Booking, user: User) -> tuple[B
         raise NotPayable(result.message or "Payment was declined.")
 
     booking.status = BookingStatus.CONFIRMED
+    booking.paid_at = utcnow()
     booking.pending_expires_at = None
 
     _record, plaintext = await access_codes.issue(db, booking)
