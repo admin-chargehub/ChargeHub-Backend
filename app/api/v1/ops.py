@@ -16,6 +16,7 @@ from app.api.deps import DbSession, require_roles
 from app.models import (
     AuditAction,
     AuditEvent,
+    Booking,
     ChargingSession,
     Outlet,
     OutletStatus,
@@ -31,20 +32,27 @@ from app.schemas.ops import (
     AuditEventOut,
     DashboardOut,
     DayPointOut,
+    ExtendIn,
     ImpactOut,
+    LookupOut,
     OpsOutletOut,
     OpsSessionOut,
     OpsStationDetailOut,
     OpsStationOut,
     OutletStatusIn,
     OverviewOut,
+    RefundIn,
     ReportOut,
+    StationActiveIn,
     StationTotalsOut,
     TelemetryOut,
     UpcomingBookingOut,
+    WalkInIn,
+    WalkInOut,
 )
-from app.services import audit, impact, ops
+from app.services import audit, counter, impact, ops
 from app.services import sessions as session_service
+from app.services.bookings import OutletUnavailable, PlanUnavailable, SlotTaken
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 
@@ -372,3 +380,229 @@ async def audit_trail(
         .all()
     )
     return [AuditEventOut.model_validate(r) for r in rows]
+
+
+# ------------------------------------------------------------- counter ---
+# Writes the customer API deliberately does not expose. Everything below
+# moves money or power, so everything below is audited.
+
+
+@router.post("/bookings", response_model=WalkInOut, status_code=status.HTTP_201_CREATED)
+async def book_walk_in(
+    payload: WalkInIn, db: DbSession, actor: OperatorUser
+) -> WalkInOut:
+    """Book and take payment for someone standing at the counter.
+
+    The pilot is a kiosk on a campus. People arrive with cash and a phone
+    that has no data, and before this the platform had no way to serve them
+    at all — which would have pushed those takings off the books rather than
+    into a report.
+    """
+    try:
+        result = await counter.book_walk_in(
+            db,
+            operator=actor,
+            outlet_id=payload.outlet_id,
+            plan_id=payload.plan_id,
+            name=payload.name,
+            phone=payload.phone,
+            email=payload.email,
+            method=payload.payment_method,
+        )
+    except (OutletUnavailable, PlanUnavailable, SlotTaken) as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    outlet = (
+        await db.execute(select(Outlet).where(Outlet.id == payload.outlet_id))
+    ).scalar_one()
+    station = (
+        await db.execute(select(Station).where(Station.id == outlet.station_id))
+    ).scalar_one()
+
+    await audit.record(
+        db,
+        actor=actor,
+        action=AuditAction.WALK_IN_BOOKED,
+        target_type="booking",
+        target_id=result.booking.id,
+        target_label=f"{station.name} \u00b7 {_outlet_label(outlet)}",
+        summary=(
+            f"Booked {_outlet_label(outlet)} at {station.name} for "
+            f"{result.user.full_name} "
+            f"({payload.payment_method.value}, \u20a6{result.booking.amount_kobo / 100:,.0f})"
+        ),
+    )
+    await db.commit()
+
+    return WalkInOut(
+        booking_id=result.booking.id,
+        access_code=result.access_code,
+        customer_name=result.user.full_name,
+        customer_phone=result.user.phone,
+        new_customer=result.created_user,
+        station_name=station.name,
+        outlet_label=_outlet_label(outlet),
+        starts_at=result.booking.starts_at,
+        ends_at=result.booking.ends_at,
+        amount_kobo=result.booking.amount_kobo,
+        payment_method=payload.payment_method.value,
+    )
+
+
+@router.post("/sessions/{session_id}/extend", response_model=OpsSessionOut)
+async def extend_session(
+    session_id: uuid.UUID, payload: ExtendIn, db: DbSession, actor: OperatorUser
+) -> OpsSessionOut:
+    """Give a running session more time.
+
+    Refused when the extra window collides with somebody else's booking —
+    otherwise this quietly hands the next customer's slot to whoever is
+    already standing there.
+    """
+    row = (
+        await db.execute(ops.sessions_query().where(ChargingSession.id == session_id))
+    ).first()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+
+    session, outlet, station, user = row
+    try:
+        await counter.extend_session(db, session, payload.minutes)
+    except counter.CounterError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    await audit.record(
+        db,
+        actor=actor,
+        action=AuditAction.SESSION_EXTENDED,
+        target_type="session",
+        target_id=session.id,
+        target_label=f"{station.name} \u00b7 {_outlet_label(outlet)}",
+        summary=(
+            f"Extended {user.full_name}'s session on {_outlet_label(outlet)} "
+            f"at {station.name} by {payload.minutes} minutes"
+            + (f" ({payload.reason})" if payload.reason else "")
+        ),
+    )
+    await db.commit()
+    await db.refresh(session)
+    return _session_row(session, outlet, station, user)
+
+
+@router.post("/bookings/{booking_id}/refund", response_model=dict)
+async def refund_booking(
+    booking_id: uuid.UUID, payload: RefundIn, db: DbSession, actor: OperatorUser
+) -> dict:
+    """Record money given back.
+
+    Records it; it does not move it. The operator hands over cash, or raises
+    the refund with the gateway. Claiming the platform had moved the money
+    would be worse than recording nothing.
+    """
+    booking = (
+        await db.execute(select(Booking).where(Booking.id == booking_id))
+    ).scalar_one_or_none()
+    if booking is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Booking not found")
+
+    try:
+        await counter.refund(db, booking, kobo=payload.kobo, reason=payload.reason)
+    except counter.CounterError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    customer = (
+        await db.execute(select(User).where(User.id == booking.user_id))
+    ).scalar_one()
+
+    await audit.record(
+        db,
+        actor=actor,
+        action=AuditAction.BOOKING_REFUNDED,
+        target_type="booking",
+        target_id=booking.id,
+        target_label=customer.full_name,
+        summary=(
+            f"Refunded \u20a6{payload.kobo / 100:,.0f} to {customer.full_name} "
+            f"({payload.reason})"
+        ),
+    )
+    await db.commit()
+    return {
+        "booking_id": str(booking.id),
+        "refund_kobo": booking.refund_kobo,
+        "amount_kobo": booking.amount_kobo,
+    }
+
+
+@router.patch("/stations/{station_id}", response_model=OpsStationOut)
+async def set_station_active(
+    station_id: uuid.UUID, payload: StationActiveIn, db: DbSession, actor: OperatorUser
+) -> OpsStationOut:
+    """Open or close a whole hub.
+
+    Closing hides it from the customer app immediately. It does not touch
+    sessions already running — people mid-charge keep what they paid for, and
+    the hub empties out on its own.
+    """
+    station = (
+        await db.execute(select(Station).where(Station.id == station_id))
+    ).scalar_one_or_none()
+    if station is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Station not found")
+    if payload.is_active is False and not (payload.reason or "").strip():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "Say why the hub is closing"
+        )
+
+    station.is_active = payload.is_active
+    await audit.record(
+        db,
+        actor=actor,
+        action=(
+            AuditAction.STATION_ACTIVATED
+            if payload.is_active
+            else AuditAction.STATION_DEACTIVATED
+        ),
+        target_type="station",
+        target_id=station.id,
+        target_label=station.name,
+        summary=(
+            f"{station.name} {'opened' if payload.is_active else 'closed'}"
+            + (f" ({payload.reason})" if payload.reason else "")
+        ),
+    )
+    await db.commit()
+
+    rows = await _station_rows(db)
+    return next(r for r in rows if r.id == station_id)
+
+
+@router.get("/lookup", response_model=LookupOut | None)
+async def lookup_code(
+    code: Annotated[str, Query(min_length=1, max_length=32)],
+    db: DbSession,
+    _: OperatorUser,
+) -> LookupOut | None:
+    """Answer "what is this PIN?" for somebody at the counter.
+
+    Resolved by hash exactly the way redemption resolves it, so a code this
+    screen calls valid is a code the keypad will accept.
+    """
+    found = await counter.find_by_code(db, code)
+    if found is None:
+        return None
+    return LookupOut(
+        booking_id=found.booking.id,
+        station_name=found.station.name,
+        outlet_label=_outlet_label(found.outlet),
+        customer_name=found.user.full_name,
+        customer_phone=found.user.phone,
+        status=found.booking.status.value,
+        code_state=found.code_state,
+        starts_at=found.booking.starts_at,
+        ends_at=found.booking.ends_at,
+        amount_kobo=found.booking.amount_kobo,
+        refund_kobo=found.booking.refund_kobo,
+        session_id=found.session.id if found.session else None,
+        session_status=found.session.status.value if found.session else None,
+    )

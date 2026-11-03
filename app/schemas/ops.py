@@ -11,7 +11,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models import OutletStatus, PowerSource
+from app.models import OutletStatus, PaymentMethod, PowerSource
 
 
 class OverviewOut(BaseModel):
@@ -171,3 +171,66 @@ class AuditEventOut(BaseModel):
     target_label: str | None
     summary: str
     at: datetime
+
+
+class WalkInIn(BaseModel):
+    """A booking taken at the counter for someone who is standing there."""
+
+    outlet_id: uuid.UUID
+    plan_id: uuid.UUID
+    name: str = Field(min_length=1, max_length=120)
+    #: How the same person is recognised on their second visit. Optional,
+    #: because somebody may not want to give it and should still be served.
+    phone: str | None = Field(default=None, max_length=32)
+    email: str | None = Field(default=None, max_length=255)
+    payment_method: PaymentMethod = PaymentMethod.CASH
+
+
+class WalkInOut(BaseModel):
+    booking_id: uuid.UUID
+    #: Plaintext, returned once. The operator writes it on a slip.
+    access_code: str
+    customer_name: str
+    customer_phone: str | None
+    #: True when this created a new customer record, so the UI can say so
+    #: rather than leaving the operator unsure whether they made a duplicate.
+    new_customer: bool
+    station_name: str
+    outlet_label: str
+    starts_at: datetime
+    ends_at: datetime
+    amount_kobo: int
+    payment_method: str
+
+
+class ExtendIn(BaseModel):
+    minutes: int = Field(ge=1, le=24 * 60)
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class RefundIn(BaseModel):
+    kobo: int = Field(gt=0)
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class StationActiveIn(BaseModel):
+    is_active: bool
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class LookupOut(BaseModel):
+    booking_id: uuid.UUID
+    station_name: str
+    outlet_label: str
+    customer_name: str
+    customer_phone: str | None
+    status: str
+    #: "valid" / "already used" / "expired" / "not valid yet" — resolved the
+    #: same way the keypad resolves it.
+    code_state: str
+    starts_at: datetime
+    ends_at: datetime
+    amount_kobo: int
+    refund_kobo: int
+    session_id: uuid.UUID | None
+    session_status: str | None

@@ -9,6 +9,23 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, UtcDateTime, UUIDMixin
 
 
+class PaymentMethod(StrEnum):
+    """How the money arrived.
+
+    CASH exists because the pilot is a kiosk on a university campus: people
+    turn up without a smartphone, or with one that has no data, and an
+    operator takes a note and books it for them. A platform that can only be
+    paid through its own app does not work at that counter, and pretending
+    otherwise would push those takings off the books entirely.
+    """
+
+    CARD = "card"
+    TRANSFER = "transfer"
+    USSD = "ussd"
+    WALLET = "wallet"
+    CASH = "cash"
+
+
 class BookingStatus(StrEnum):
     PENDING = "pending"        # created, awaiting payment
     CONFIRMED = "confirmed"    # paid, not yet started
@@ -80,6 +97,28 @@ class Booking(UUIDMixin, TimestampMixin, Base):
     #: What the customer was actually charged, snapshotted at creation.
     #: Plan prices change; a receipt must show what was paid, not today's price.
     amount_kobo: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    #: How it was paid for. Operator-created walk-ins are CASH and never
+    #: touch a gateway; everything from the app is CARD until real providers
+    #: land.
+    payment_method: Mapped[PaymentMethod] = mapped_column(
+        SAEnum(PaymentMethod, name="payment_method"),
+        default=PaymentMethod.CARD,
+        nullable=False,
+    )
+
+    #: The operator who booked this on someone's behalf. Null for self-service.
+    #: Kept so cash takings can be reconciled per person at the end of a shift
+    #: — the point at which cash handling either works or does not.
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    #: Money given back, in kobo. Partial refunds are possible, so this is an
+    #: amount rather than a flag; revenue reporting nets it off.
+    refund_kobo: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    refunded_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    refund_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     #: When payment settled. Revenue has to be reportable by the day the money
     #: arrived, and `updated_at` cannot stand in for that — any later edit to

@@ -104,6 +104,8 @@ class StationTelemetry(UUIDMixin, TimestampMixin, Base):
 
 class AuditAction(StrEnum):
     OUTLET_STATUS_CHANGED = "outlet_status_changed"
+    WALK_IN_BOOKED = "walk_in_booked"
+    BOOKING_REFUNDED = "booking_refunded"
     SESSION_ENDED_BY_OPERATOR = "session_ended_by_operator"
     SESSION_EXTENDED = "session_extended"
     STATION_ACTIVATED = "station_activated"

@@ -105,7 +105,12 @@ async def overview(db: AsyncSession) -> Overview:
     # and a report that only counts redeemed codes understates the day.
     revenue_today = (
         await db.execute(
-            select(func.coalesce(func.sum(Booking.amount_kobo), 0)).where(
+            # Net of refunds. A takings figure that ignores money given back
+            # is not revenue, it is turnover, and it will not reconcile with
+            # the till at the end of a shift.
+            select(
+                func.coalesce(func.sum(Booking.amount_kobo - Booking.refund_kobo), 0)
+            ).where(
                 Booking.paid_at.is_not(None),
                 Booking.paid_at >= start,
                 Booking.paid_at <= end,
@@ -221,7 +226,9 @@ async def daily_series(db: AsyncSession, days: int) -> list[DayRow]:
         await db.execute(
             select(
                 func.date(Booking.paid_at).label("day"),
-                func.coalesce(func.sum(Booking.amount_kobo), 0),
+                func.coalesce(
+                    func.sum(Booking.amount_kobo - Booking.refund_kobo), 0
+                ),
             )
             .where(
                 Booking.paid_at.is_not(None),

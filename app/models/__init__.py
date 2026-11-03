@@ -1,6 +1,6 @@
 from app.models.access_code import AccessCode
 from app.models.base import Base, TimestampMixin, UtcDateTime, UUIDMixin, utcnow
-from app.models.booking import Booking, BookingStatus, Plan
+from app.models.booking import Booking, BookingStatus, PaymentMethod, Plan
 from app.models.ops import (
     OFFLINE_AFTER,
     AuditAction,
@@ -22,6 +22,7 @@ __all__ = [
     "BookingStatus",
     "ChargingSession",
     "Outlet",
+    "PaymentMethod",
     "OutletStatus",
     "Plan",
     "PowerSource",
