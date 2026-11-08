@@ -113,6 +113,10 @@ async def dashboard(db: DbSession, _: OperatorUser) -> DashboardOut:
     loaded, and five parallel requests means five chances for one to fail and
     leave a panel blank with no explanation.
     """
+    # Close anything that has run out before counting, so "active sessions"
+    # on the dashboard means active rather than "never cleaned up".
+    await session_service.sweep_expired(db)
+
     summary = await ops.overview(db)
 
     return DashboardOut(
@@ -302,6 +306,24 @@ async def list_sessions(
             ops.sessions_query(station_id=station_id, active_only=active_only).limit(limit)
         )
     ).all()
+
+    # Bring any session whose window has closed up to date before reporting
+    # it. `get_live` is what actually ends a session, and it used to be
+    # reachable only from the customer's own endpoints — so a customer who
+    # shut their tab left the console showing "Running" indefinitely.
+    #
+    # The sweeper below handles this without anyone looking; doing it here as
+    # well means the console is right the moment an operator opens it rather
+    # than up to a sweep behind. Active sessions are bounded by the number of
+    # outlets, so this is a handful of rows at most.
+    changed = False
+    for session, *_ in rows:
+        if session.status is SessionStatus.ACTIVE:
+            await session_service.get_live(db, session)
+            changed = True
+    if changed:
+        await db.commit()
+
     return [_session_row(*row) for row in rows]
 
 

@@ -16,6 +16,12 @@ class Settings(BaseSettings):
 
     environment: str = "development"
 
+    #: Shared secret for the cron-driven housekeeping endpoints. Empty means
+    #: housekeeping is disabled and the endpoint says so, rather than running
+    #: unauthenticated — an open endpoint that cancels bookings and ends
+    #: sessions is worse than one nobody can call.
+    internal_token: str = ""
+
     #: Fabricate energy readings for active sessions, so the Active Session and
     #: receipt screens have moving data before any firmware exists. Development
     #: only — `get_settings()` refuses to start with this on in production,
@@ -52,6 +58,11 @@ def get_settings() -> Settings:
     settings = Settings()
     if settings.is_production and settings.secret_key == "dev-only-change-me":
         raise RuntimeError("SECRET_KEY must be set to a real value in production")
+    if settings.is_production and not settings.internal_token:
+        raise RuntimeError(
+            "INTERNAL_TOKEN must be set in production — without it the "
+            "sweepers never run, and sessions stay active after they end."
+        )
     if settings.is_production and settings.simulate_telemetry:
         raise RuntimeError(
             "SIMULATE_TELEMETRY must be off in production — it invents energy "

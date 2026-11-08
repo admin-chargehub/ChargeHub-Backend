@@ -314,6 +314,37 @@ async def end(
     return session
 
 
+async def sweep_expired(db: AsyncSession) -> int:
+    """End every active session whose paid window has closed.
+
+    Until this existed, the only thing that ever ended a session was the
+    customer reopening their own session screen — `get_live` is called from
+    the two customer endpoints and nowhere else. A customer who closes the
+    tab and walks away leaves the session ACTIVE forever: the operator
+    console shows it running, the booking never completes, and the outlet is
+    never released by `end()`.
+
+    Run it on a minute-ish cadence alongside `sweep_pending`. Both are
+    idempotent, so a missed run costs nothing but lateness.
+    """
+    due = (
+        (
+            await db.execute(
+                select(ChargingSession)
+                .where(ChargingSession.status == SessionStatus.ACTIVE)
+                .where(ChargingSession.ends_at <= utcnow())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for session in due:
+        await end(db, session, SessionEndReason.TIME_EXPIRED)
+    if due:
+        await db.commit()
+    return len(due)
+
+
 async def for_booking(db: AsyncSession, booking_id: uuid.UUID) -> ChargingSession | None:
     return (
         await db.execute(
